@@ -1,13 +1,12 @@
 #Finds Distance estimates for a specified cluster
 #Error propigation via taylor approximation (assuming symettric gaussian errors)
-    #TODO: Change to finer Spectral class bins
-    #TODO: get virial mass
+    #TODO: Correct Spectroscopic parallax distance estimate
+
     #TODO: add cepheid PL(C) distance estimate
+    #TODO: get virial mass
+    #TODO: add pipeline for queries (gaia, simbad)
 
     #TODO: get better metallicity source
-    #TODO: add pipeline for queries (gaia, simbad)
-    #TODO: Use cubic formula for photometric system conversions (or otherwise improve the algorithm)
-
     #TODO: add ZAMS MS fit
     #TODO: add isochrone fit, also get age
     #TODO: add better cluster membership filtering with algorithms
@@ -20,6 +19,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy.optimize import curve_fit
+from scipy import spatial
 from scipy import stats as stats_sci
 import statistics as stat
 import sys
@@ -35,14 +35,14 @@ def main():
     #Set z-score for pm exclusion
     z=1
     #Choose GAIA CSV input file name
-    GAIAname = "Hyades-result.csv"
-    SIMBADname = "simbad.txt"
+    GAIAname = "Pleiades-result.csv"
+    SIMBADname = "pleiadesSim.csv"
 #----------SET USER PARAMETERS HERE---------
 
 
     #Import Query Results, see GAIA and SIMBAD documentation for csv file variable names
     gaia = pd.read_csv(GAIAname)
-    simbad = pd.read_csv(SIMBADname,sep="|")
+    simbad = pd.read_csv(SIMBADname,sep=";")
     simbad = simbad.rename(columns=lambda x: x.strip())
     simbad = simbad.rename(columns=lambda x: "spec_type" if x=="spec. type" else x)
 
@@ -58,6 +58,19 @@ def main():
     simbad["Dec"] = simbad["coord1 (ICRS,J2000/2000)"].map(lambda x: float(x.split()[3]) + float(x.split()[4])*(1/60) + float(x.split()[5])*(1/3600))
         #Drop old coordinate format
     simbad = simbad.drop(columns=["coord1 (ICRS,J2000/2000)"])
+        #parse simbad B,V magnitudes
+    simbad['Mag B'] = simbad['Mag B'].map(lambda x: x.strip())
+    simbad['Mag V'] = simbad['Mag V'].map(lambda x: x.strip())
+    simbad = simbad[(simbad['Mag B'] != '~') & (simbad['Mag V'] != '~')]
+    simbad['Mag B'] = simbad['Mag B'].astype(float)
+    simbad['Mag V'] = simbad['Mag V'].astype(float)
+    simbad = simbad.rename(columns={'Mag B':"B_app",'Mag V':'V_app'})
+        #get simbad color
+    simbad["(B-V)_app"] = simbad['B_app'].astype(float) - simbad["V_app"].astype(float)
+            #setting .03 mag errors
+    simbad['err_V_app'] = .03
+    simbad['err_B_app'] = .03
+    simbad['err_(B-V)_app'] = .03 * np.sqrt(2) #by error propigation
 
     #Filtering gaia data for nonvalues and similar apparant magnitudes
     maxMag = 10
@@ -101,10 +114,10 @@ def main():
 
     #Get cluster members by removing pm and parallax z-std outliers
     data = getMems(data,z)
-    print("Num Members =", data.shape[0])
 
     #Get intrinsic magnitudes and color excesses from spec types
     data = getSpecParams(data)
+    print("Num members can use =", data.shape[0])
 
     #get cluster metallicity
     FeH = np.nanmean( data["fem_gspspec"] - data["mh_gspspec"] )
@@ -115,17 +128,26 @@ def main():
     print("Fe/H =", figRound(FeH), ", lowerConf =", figRound(FeH_lower), ", upperConf = ", figRound(FeH_upper))
 
     #gaia g,bp,rp --> Johnson U,B,V
-        #Conversions from https://gea.esac.esa.int/archive/documentation/GDR2/Data_processing/chap_cu5pho/sec_cu5pho_calibr/ssec_cu5pho_PhotTransf.html#Ch5.T8
-    data["V_app"] = data["phot_g_mean_mag"] + .01760 + .006860*(data["phot_bp_mean_mag"] - data["phot_rp_mean_mag"]) + .1732*(data["phot_bp_mean_mag"] - data["phot_rp_mean_mag"])**2
+        #Conversions from https://gea.esac.esa.int/archive/documentation/GDR3/Data_processing/chap_cu5pho/cu5pho_sec_photSystem/cu5pho_ssec_photRelations.html
     data["bp-rp"] = data["phot_bp_mean_mag"] - data["phot_rp_mean_mag"]
-        #solving a cubic polynomial for apparent colors, picking largest root (formulas from setting f(G_bp-G_rp)=f(color)=G-V)
-    data["(B-V)_app"] = data["bp-rp"].map(lambda x: np.max(np.real(np.poly1d([-.001768,-.2297,-.02385,-.01147+.006860*(x)+.1732*(x**2)]).roots)) )
-    data["(V-R)_app"] = data["bp-rp"].map(lambda x: np.max(np.real(np.poly1d([0.2225,-1.016,-0.01784,-.00509+.006860*(x)+.1732*(x**2)]).roots)) )
-        #set errors (approx. per conversion formulas)
-    data["err_V_app"] = .05
-    data["err_(B-V)_app"] = .08
-    data["err_(V-R)_app"] = .07
+    data["V_gaia"] = data["phot_g_mean_mag"] + .02704 - .01424*(data["bp-rp"]) + 0.2156*(data["bp-rp"])**2 - 0.01426*(data["bp-rp"])**3
+    data["R_gaia"] = data["phot_g_mean_mag"] + .02275 - .3961*(data["bp-rp"]) + 0.1243*(data["bp-rp"])**2 + 0.01396*(data["bp-rp"])**3
+    data["(V-R)_gaia"] = data['V_gaia'] - data['R_gaia']
     
+    #plot both V magnitudes
+    plt.figure()
+    plt.title("V magnitudes")
+    plt.xlabel("V_simbad [Mag]")
+    plt.ylabel("V_gaia [Mag]")
+    plt.scatter(data["V_app"],data["V_gaia"])
+    lp = np.linspace(min(data['V_app']),max(data['V_app']),1000)
+    plt.plot(lp,lp)
+    plt.show()
+
+    #remove spurious coordinate matches
+    data = data[np.abs(data['V_app']-data['V_gaia']<.05)]
+    print("Num members can use =", data.shape[0])
+
     #Plot color-color
         #gaia colors
     plt.figure()
@@ -137,9 +159,9 @@ def main():
         #johnson colors
     plt.figure()
     plt.title("Color-Color (not dereddened)")
-    plt.scatter(data["(B-V)_app"],data["(V-R)_app"])
+    plt.scatter(data["(B-V)_app"],data["(V-R)_gaia"])
     plt.xlabel("(B-V)_app [mag]")
-    plt.ylabel("(V-R)_app [mag]")
+    plt.ylabel("(V-R)_gaia [mag]")
     plt.show()
         #drop gaia magnitudes
     data = data.drop(columns=["phot_g_mean_mag","phot_bp_mean_mag","phot_rp_mean_mag","bp-rp"])
@@ -172,7 +194,8 @@ def main():
     plt.title("Observed CMD")
     plt.xlabel("(B-V)_app [Mag]")
     plt.ylabel("V_app [Mag]")
-    plt.scatter(data["(B-V)_app"],data["V_app"], color="red", label = "Hyades Stars")
+    plt.scatter(data["(B-V)_app"],data["V_app"], color="red", label = "=Cluster Stars")
+    plt.errorbar(data["(B-V)_app"],data["V_app"],xerr=data["err_(B-V)_app"],yerr=data["err_V_app"],fmt='none')
     plt.legend()
     plt.show()
 
@@ -186,18 +209,40 @@ def main():
     plt.title("Corrected CMD")
     plt.xlabel("(B-V)_intr [Mag]")
     plt.ylabel("V_rel [Mag]")
-    plt.scatter(data["(B-V)_intr"],data["V_rel"], color="red", label = "Hyades Stars")
+    plt.scatter(data["(B-V)_intr"],data["V_rel"], color="red", label = "Cluster Stars")
     plt.legend()
     plt.show()
 
+    #Get individual spectroscopic parallax distance
+    data["dist_spec_parallax"] = ((data["V_rel"] - data["V_intr"] + 5)/5)**10
+    data["err_dist_spec_parallax"] = np.log(10) * (1/5) * data["dist_spec_parallax"] * np.sqrt(data["err_V_rel"]**2 + data["err_V_intr"]**2)
+
+    #Check for biased spec parallax distances
+    plt.figure()
+    plt.gca().invert_yaxis()
+    plt.title("Spec Parallax distances")
+    plt.xlabel("Spec Type")
+    plt.ylabel("Distance [pc]")
+    plt.scatter(data["spec_type"],data["dist_spec_parallax"],color='red',label='spec')
+    plt.scatter(data["spec_type"],data["dist_trig_parallax"],color='blue',label='trig')
+    plt.legend()
+    plt.show()
+
+    #Plot Cluster Spec Parallax distances
+    plt.figure()
+    plt.title("Spec Parallax Distances (Cluster Only)")
+    plt.xlabel("Distance (pc)")
+    plt.ylabel("Freq")
+    plt.hist(data["dist_spec_parallax"], bins=100, range=(0,max['dist_spec_parallax']))
+    plt.show()
 
     #Get Distance Estimates and print them
         #Trig parallax
     dist_trigParallax = stat.mean(data["dist_trig_parallax"])
     err_dist_trigParallax = np.sqrt(np.sum((data["err_dist_trig_parallax"]**2))) / data.shape[0]
-        #Spec Parallax
-    dist_specParallax = stat.mean(((data["V_rel"] - data["V_intr"] + 5)/5)**10)
-    err_dist_specParallax = (1/5)* np.log(10) * np.sqrt(np.sum( (((data["V_rel"] - data["V_intr"] + 5)/5)**10)**2 * (data["err_V_rel"]**2 + data["err_V_intr"]**2) )) / data.shape[0]
+        #spec parallax
+    dist_specParallax = stat.median(data["dist_spec_parallax"]) #taking median to deal with outliers
+    err_dist_specParallax = np.sqrt(np.sum((data["err_dist_spec_parallax"]**2))) / data.shape[0]
         #print
     print("Trig Parallax: " + str(sciRound(dist_trigParallax,err_dist_trigParallax)) + " pc")
     print("Extinction: " + str(sciRound(dist_ext,err_dist_ext)) + " pc")
@@ -230,7 +275,7 @@ def varExt(stars):
     #Print Results
     print("R = " + str(sciRound(r,r_err)))
         #Use R=3.1 if regression R values doesn't make sense
-    if r<0 or r>10:
+    if r<0 or r>5:
         r,r_err = 3.1,.1
         print("Assuming R=3.1 +/- .1")
 
@@ -239,7 +284,7 @@ def varExt(stars):
     plt.title("Variable Extinction (Non-Reddened Removed from R calculation)")
     plt.xlabel("E(B-V) [Mag]")
     plt.ylabel("dMod_app [Mag]")
-    plt.scatter(stars["colorExcess"],stars["dMod_app"], color="red", label = "Hyades Stars")
+    plt.scatter(stars["colorExcess"],stars["dMod_app"], color="red", label = "Cluster Stars")
     es = np.linspace(np.min(stars["colorExcess"]),np.max(stars["colorExcess"]),10000)
     plt.plot(es,(dMod_real + es*r), color="blue", label = "Variable Extinction Trend")
     plt.legend()
@@ -297,27 +342,58 @@ def coordMatch(gaia, simbad):
     return matches
 
 #Get intrinsic color and magnitude from spectral type
-    #Use Tsvetkov's tabulated values (https://link.springer.com/content/pdf/10.1134/S1063773708010039.pdf)
 def getSpecParams(frame):
-        #tabulated data in form {spec type: [V, B-V]}
-    tabV = {"O5":-5.6,"O9":-4.5,"B0":-4.0,"B5":-4.2,"A0":0.6,"A5":1.9,"F0":2.7,"F5":3.5,"G0":4.4,"G5":5.1,"K0":5.9,"K5":7.3,"M0":8.8,"M5":12.3}
-    tabB_V = {"O5":-0.33,"O9":-0.31,"B0":-0.30,"B5":-0.17,"A0":-0.02,"A5":0.15,"F0":0.30,"F5":0.44,"G0":0.58,"G5":0.68,"K0":0.81,"K5":1.15,"M0":1.40,"M5":1.64}
+            #create list of ordered spec types
     order = "OBAFGKM_"
-    order2 = ["O5","O5","O9","B0","B5","A0","A5","F0","F5","G0","G5","K0","K5","M0","M5","M5"]
-        #deal with different O-type numbers in tabulated data
-    frame["spec_type"] = frame["spec_type"].map(lambda x: "O" + str(float(x[1:-1])+5) + "V" if x[:1]=="O" else x)
+    order2 = [("O" + str(i)) for i in range(5,10)]
+    order2.extend([(let + str(i)) for let in "BAFGK" for i in range(0,10)])
+    order2.extend([("M" + str(i)) for i in range(0,9)])
+    #Used tabuled M_V values from Tsvetkov et al. (https://link.springer.com/content/pdf/10.1134/S1063773708010039.pdf)
+        #Johnson system
+    tabV = {"O5":-5.6,"O9":-4.5,"B0":-4.0,"B5":-4.2,"A0":0.6,"A5":1.9,"F0":2.7,"F5":3.5,"G0":4.4,"G5":5.1,"K0":5.9,"K5":7.3,"M0":8.8,"M5":12.3}
+    #Used tabuled M_V values from:
+        #Loktin and Beshenov for O4-B8 (http://ezproxy.lib.utexas.edu/login?url=https://search.ebscohost.com/login.aspx?direct=true&db=a9h&AN=7289091&site=ehost-live)
+            #B9 = avg(A0,B8)
+        #Grenier et al. for A0-F5 (https://adsabs.harvard.edu/pdf/1985A%26A...145..331G)
+        #Mikami and Heck for F6-K6 (https://adsabs.harvard.edu/pdf/1982PASJ...34..529M)
+            #K2-4 adjusted by error for high and low in range (i.e., K2 = K0-3 - error)
+            #K5 = K6 - error; K7 = K6 + error; K8 = K6 +2*error; K9 = avg(M0,K8)
+        #Mikami for M0-M4 (https://ui.adsabs.harvard.edu/abs/1978PASJ...30..191M/abstract)
+            #adjusted by error for high and low in range (i.e., M2 = M0-1 - error)
+        #Tsvetkov et al. for M5 and O5 (https://link.springer.com/content/pdf/10.1134/S1063773708010039.pdf)
+            #M6-8 via linear continutation of M4 to M5 difference
+    tabV = {"O5":-5.6,'O6':-5.38,'O7':-4.8,'O8':-4.66,'O9':-4.18,
+        'B0':-3.55,'B1':-2.84,'B2':-2.11,'B3':-1.56,'B4':-1.38,'B5':-1.2,'B6':-.86,'B7':-.58,'B8':-.12,'B9':-.4,
+        'A0':.4,'A1':.5,'A2':.6,'A3':.8,'A4':1,'A5':1.4,'A6':1.6,'A7':1.7,'A8':1.8,'A9':1.9,
+        'F0':2.3,'F1':2.5,'F2':2.9,'F3':3.1,'F4':3.2,'F5':3.4, 'F6':3.43,'F7':3.43,'F8':3.53,'F9':3.53,
+        'G0':3.83,'G1':3.83,'G2':4.52,'G3':4.52,'G4':4.64,'G5':4.64,'G6':4.11,'G7':4.11,'G8':5.03,'G9':5.03,
+        'K0':5.65,'K1':5.65,'K2':6.05,'K3':6.44,'K4':6.83,'K5':6.9,'K6':7.22,'K7':7.54,'K8':7.86,'K9':8.08,
+        'M0':8.3,'M1':8.9,'M2':8.1,'M3':8.7,'M4':9.3,'M5':12.3,'M6':15.3,"M7":18.3,"M8":21.3
+        }
+    #Used tabulated B-V values from FitzGerald (https://ui.adsabs.harvard.edu/abs/1970A%26A.....4..234F/abstract)
+        #missing B-V tabulated values were taken as an average of the surrounding bins (A6,K6,K8)
+        #Johnson system        
+    tabB_V={"O5":-0.32,'O6':-.32,'O7':-.32,'O8':-.31,'O9':-.31,
+        'B0':-.3,'B1':-.26,'B2':-.24,'B3':-.2,'B4':-.18,'B5':-.16,'B6':-.14,'B7':-.13,'B8':-.11,'B9':-.07,
+        'A0':-.01,'A1':.02,'A2':.05,'A3':.08,'A4':.12,'A5':.15,'A6':.175,'A7':.2,'A8':.27,"A9":.3,
+        'F0':.32,'F1':.34,"F2":.35,'F3':.41,'F4':.42,'F5':.45,'F6':.48,'F7':.5,'F8':.53,'F9':.56,
+        'G0':.6,'G1':.62,'G2':.63,'G3':.65,'G4':.66,'G5':.68,'G6':.72,'G7':.73,'G8':.74,'G9':.76,
+        'K0':.81,'K1':.86,'K2':.92,'K3':.95,'K4':1,'K5':1.15,'K6':1.24,'K7':1.33,'K8':1.35,'K9':1.37,
+        'M0':1.37,'M1':1.47,'M2':1.47,'M3':1.47,'M4':1.52,"M5":1.61,'M6':1.64,'M7':1.68,'M8':1.77
+        }
+
         #spec types round to nearest tabulated type
-    frame["spec_type"] = frame["spec_type"].map(lambda x: x[:1] + str(5*round(float(x[1:-1])/5)) if (5*round(float(x[1:-1])/5) < 10) else order[order.index(x[:1])+1] + "0")
-        #deal with M5 being last listed type
-    frame["spec_type"] = frame["spec_type"].map(lambda x: "M5" if (x=="_0") else x)
+    frame["spec_type"] = frame["spec_type"].map(lambda x: x[:1] + str(round(float(x[1:-1]))) if (round(float(x[1:-1])) < 10) else order[order.index(x[:1])+1] + "0")
+        #deal with last listed types (drop if after M8)
+    frame["spec_type"] = frame["spec_type"].map(lambda x: "drop" if (x=="_0" or (float(x[1:])>8 and x[1:]=='M')) else x)
+    frame = frame[frame['spec_type'] != 'drop']
         #get intrinsic/tabulated values
-        #estimate error as average half-difference to adjacent bins
+            #also deal with edge of arrays: I use np.sign to check if index=0 or if index>0 because lambda doesn't support elif
     frame["V_intr"] = frame["spec_type"].map(lambda x: tabV[x])
-    frame["err_V_intr"] = frame["spec_type"].map(lambda x: np.abs(tabV[order2[order2.index(x)-1]]) + np.abs(tabV[order2[order2.index(x)+1]])/2 if (order2.index(x) != 0) else np.abs(tabV[order2[order2.index(x)+1]])/2)
+    frame["err_V_intr"] = frame["spec_type"].map(lambda x: .5) #per Tsvetkov et al. paper, 
     frame["(B-V)_intr"] = frame["spec_type"].map(lambda x: tabB_V[x])
-    frame["err_(B-V)_intr"] = frame["spec_type"].map(lambda x: np.abs(tabB_V[order2[order2.index(x)-1]]) + np.abs(tabB_V[order2[order2.index(x)+1]])/2 if (order2.index(x) != 0) else np.abs(tabB_V[order2[order2.index(x)+1]])/2)
-        #drop spec types
-    frame = frame.drop(columns=["spec_type"])
+    frame["err_(B-V)_intr"] = frame["spec_type"].map(lambda x: .03) #approx difference between Tsvetkov et al. and FitxGerald colors
+
     return frame
 
 #Run Main

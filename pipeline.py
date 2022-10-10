@@ -1,10 +1,11 @@
 #Finds Distance estimates for a specified cluster
 #Error propigation via taylor approximation (assuming symettric gaussian errors)
     #TODO: Correct Spectroscopic parallax distance estimate
-
     #TODO: add cepheid PL(C) distance estimate
     #TODO: get virial mass
-    #TODO: add pipeline for queries (gaia, simbad)
+    
+    #TODO: treat gaia and simbad data seperately for more data points?
+    #TODO: add pipeline for queries
 
     #TODO: get better metallicity source
     #TODO: add ZAMS MS fit
@@ -34,8 +35,10 @@ def main():
 #----------SET USER PARAMETERS HERE---------
     #Set z-score for pm exclusion
     z=1
+    #Set size of region for variable extinction analysis (box with side length regSize, in degrees)
+    regSize = 3
     #Choose GAIA CSV input file name
-    GAIAname = "Pleiades-result.csv"
+    GAIAname = "pleiadesGaia.csv"
     SIMBADname = "pleiadesSim.csv"
 #----------SET USER PARAMETERS HERE---------
 
@@ -117,7 +120,6 @@ def main():
 
     #Get intrinsic magnitudes and color excesses from spec types
     data = getSpecParams(data)
-    print("Num members can use =", data.shape[0])
 
     #get cluster metallicity
     FeH = np.nanmean( data["fem_gspspec"] - data["mh_gspspec"] )
@@ -144,7 +146,7 @@ def main():
     plt.plot(lp,lp)
     plt.show()
 
-    #remove spurious coordinate matches
+    #remove spurious coordinate matches by different V_magnitudes across databases
     data = data[np.abs(data['V_app']-data['V_gaia']<.05)]
     print("Num members can use =", data.shape[0])
 
@@ -199,9 +201,34 @@ def main():
     plt.legend()
     plt.show()
 
-    #Apply Variable Extinction Method; correct for extinction and reddening
-    R, R_err, dist_ext, err_dist_ext = varExt(data)
-    data = ext_correct(data,R,R_err)
+    #Apply Variable Extinction Method to whole cluster
+    R, R_err, dMod_real,dMod_real_err = varExt(data,True)
+    #Print Results
+    print("R = " + str(sciRound(R,R_err)))
+        #Use R=3.1 if regression R values doesn't make sense
+    if R<0:
+        R,R_err = 3.1,.1
+        print("Assuming R=3.1 +/- .1")
+        #Calculate distance estimate with error
+    dMod = ufloat(dMod_real,dMod_real_err)
+    dist = 10**((dMod + 5) / 5)
+    err_dist_ext = dist.std_dev
+    dist_ext = dist.nominal_value
+
+    #Create variable Extinciton graph
+    plt.figure()
+    plt.title("Variable Extinction (Non-Reddened Removed from R calculation)")
+    plt.xlabel("E(B-V) [Mag]")
+    plt.ylabel("dMod_app [Mag]")
+    plt.scatter(data["colorExcess"],data["dMod_app"], color="red", label = "Cluster Stars")
+    es = np.linspace(np.min(data["colorExcess"]),np.max(data["colorExcess"]),10000)
+    plt.plot(es,(dMod_real + es*R), color="blue", label = "Variable Extinction Trend")
+    plt.legend()
+    plt.show()
+
+    #apply variable extinction method to regions of cluster; correct for extinction
+    data = varExt(data,False, step=regSize,rClust = R, rClust_err = R_err)
+    data = ext_correct(data)
 
     #Plot corrected CMD
     plt.figure()
@@ -233,7 +260,7 @@ def main():
     plt.title("Spec Parallax Distances (Cluster Only)")
     plt.xlabel("Distance (pc)")
     plt.ylabel("Freq")
-    plt.hist(data["dist_spec_parallax"], bins=100, range=(0,max['dist_spec_parallax']))
+    plt.hist(data["dist_spec_parallax"], bins=100, range=(0,max(data['dist_spec_parallax'])))
     plt.show()
 
     #Get Distance Estimates and print them
@@ -241,8 +268,8 @@ def main():
     dist_trigParallax = stat.mean(data["dist_trig_parallax"])
     err_dist_trigParallax = np.sqrt(np.sum((data["err_dist_trig_parallax"]**2))) / data.shape[0]
         #spec parallax
-    dist_specParallax = stat.median(data["dist_spec_parallax"]) #taking median to deal with outliers
-    err_dist_specParallax = np.sqrt(np.sum((data["err_dist_spec_parallax"]**2))) / data.shape[0]
+    dist_specParallax = ((stat.mean(data["V_rel"] - data["V_intr"]) + 5)/5)**10
+    err_dist_specParallax = np.log(10) * (1/5) * dist_specParallax * np.sqrt(np.sum(data["err_V_rel"]**2 + data["err_V_intr"]**2))/data.shape[0]
         #print
     print("Trig Parallax: " + str(sciRound(dist_trigParallax,err_dist_trigParallax)) + " pc")
     print("Extinction: " + str(sciRound(dist_ext,err_dist_ext)) + " pc")
@@ -256,48 +283,60 @@ def getMems(stars,z):
     return stars
 
 #Applies Variable Extinction Method and returns R value and distance estimate
-def varExt(stars):
-        #Regresson to get R
-        #errors estimated by taking sigma=sqrt(err_dMod_app**2 + (3.1)**2 * err_colorExcess**2)
-    popt,pcov = curve_fit(ext_fit, stars["colorExcess"], stars["dMod_app"],sigma=np.sqrt(stars["err_dMod_app"]**2 + (3.1)**2 * stars["err_colorExcess"]**2))
-        #get fit parameters
-    perr = np.sqrt(np.diag(pcov))
-    r = popt[0]
-    r_err = perr[0]
-    dMod_real = popt[1]
-    dMod_real_err = perr[1]
-        #Calculate distance estimate with error
-    dMod = ufloat(dMod_real,dMod_real_err)
-    dist = 10**((dMod + 5) / 5)
-    dist_err = dist.std_dev
-    dist = dist.nominal_value
-
-    #Print Results
-    print("R = " + str(sciRound(r,r_err)))
-        #Use R=3.1 if regression R values doesn't make sense
-    if r<0 or r>5:
-        r,r_err = 3.1,.1
-        print("Assuming R=3.1 +/- .1")
-
-    #Create variable Extinciton graph
-    plt.figure()
-    plt.title("Variable Extinction (Non-Reddened Removed from R calculation)")
-    plt.xlabel("E(B-V) [Mag]")
-    plt.ylabel("dMod_app [Mag]")
-    plt.scatter(stars["colorExcess"],stars["dMod_app"], color="red", label = "Cluster Stars")
-    es = np.linspace(np.min(stars["colorExcess"]),np.max(stars["colorExcess"]),10000)
-    plt.plot(es,(dMod_real + es*r), color="blue", label = "Variable Extinction Trend")
-    plt.legend()
-    plt.show()
-
-    #Return R and extinction distance estimate
-    return r, r_err, dist, dist_err
+def varExt(stars,ifAll,step=1,rClust=3.1,rClust_err = .1):
+    #step sets size of regions, they are boxes with side length step in degrees
+    #ifAll indicates if we are finding R over the whole cluster (all stars) or for regions
+    if ifAll:   
+            #perform fit
+        popt,pcov = curve_fit(ext_fit, stars["colorExcess"], stars["dMod_app"],sigma=np.sqrt(stars["err_dMod_app"]**2 + (3.1)**2 * stars["err_colorExcess"]**2))
+            #get fit parameters
+        perr = np.sqrt(np.diag(pcov))
+        r = popt[0]
+        r_err = perr[0]
+        dMod_real = popt[1]
+        dMod_real_err = perr[1]
+        #Return R and corrected distance modulus for whole cluster
+        return r, r_err, dMod_real, dMod_real_err
+        #get variables for region demarkation
+    lowRa = np.floor(np.min(stars['ra']))
+    highRa = np.ceil(np.max(stars['ra']))
+    lowDec = np.floor(np.min(stars['dec']))
+    highDec = np.ceil(np.max(stars['dec']))
+    regionsRa = int(np.ceil((highRa-lowRa)/step))
+    regionsDec = int(np.ceil((highDec-lowDec)/step))
+        #store R value for each star, calculated from region it's in
+    stars["R"] = 0
+    stars["R_err"] = 0
+    #iterate over our regions
+    for i in range(0,regionsRa):
+        for j in range(0,regionsDec):
+            temp = stars[(stars['ra'] > (lowRa + i*step)) & (stars['ra'] < (lowRa + (i+1)*step)) & (stars['dec'] > (lowDec + j*step)) & (stars['dec'] < (lowDec + (j+1)*step))]
+                #if no stars in regions, skip loop iteration
+            if temp.shape[0] == 0:
+                continue
+            if temp.shape[0] < 3:
+                #if no nearby stars for comparison, assume cluster reddening
+                r = rClust
+                r_err = rClust_err
+            else:
+                #Regresson to get R
+                    #errors estimated by taking sigma=sqrt(err_dMod_app**2 + (3.1)**2 * err_colorExcess**2)
+                popt,pcov = curve_fit(ext_fit, temp["colorExcess"], temp["dMod_app"],sigma=np.sqrt(temp["err_dMod_app"]**2 + (3.1)**2 * temp["err_colorExcess"]**2))
+                    #get fit parameters
+                perr = np.sqrt(np.diag(pcov))
+                r = popt[0]
+                r_err = perr[0]
+            #update dataframe with region's r value
+            temp["R"] = r
+            temp["R_err"] = r_err
+            stars.update(temp)
+    return stars
 
 #Returns pandas dataframe to correct for extinction and reddening
-def ext_correct(stars,r,r_err):
+def ext_correct(stars):
     #Use intrinsic color from now on to account for reddening
-    stars["V_rel"] = stars["V_app"] - r*stars["colorExcess"]
-    stars["err_V_rel"] = np.sqrt(stars["err_V_app"]**2 + r**2 * stars["err_colorExcess"]**2)
+    stars["V_rel"] = stars["V_app"] - stars["R"]*stars["colorExcess"]
+    stars["err_V_rel"] = np.sqrt(stars["err_V_app"]**2 + stars['R']**2 * stars["err_colorExcess"]**2 + stars['colorExcess']**2 *stars["R_err"]**2)
     return stars
     
 #Equation for variable extinction regression

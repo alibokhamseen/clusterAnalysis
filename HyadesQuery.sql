@@ -10,6 +10,7 @@ where
     (gs.phot_g_mean_mag is not Null)
     and (gs.phot_bp_mean_mag is not Null)
     and (gs.phot_rp_mean_mag is not Null)
+    and (ap.mh_gspspec_upper is not Null)
     and (1 = CONTAINS(
         POINT(66.75, 15.87),
         CIRCLE(gs.ra, gs.dec, 300./60.)))
